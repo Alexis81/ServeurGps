@@ -12,6 +12,10 @@ HardwareSerial GPSSerial(1);
 const int GPS_TX_PIN = 17;
 const int GPS_RX_PIN = 16;
 
+// Configuration du timeout client
+const unsigned long CLIENT_TIMEOUT = 5000; // 5 secondes
+unsigned long lastClientActivity = 0;
+
 WiFiServer server(serverPort);
 WiFiClient client;
 
@@ -27,9 +31,9 @@ struct {
     int satellites;
     int precision_cm;
     bool hasValidFix;
-    int hours;      // Ajouté
-    int minutes;    // Ajouté
-    int seconds;    // Ajouté
+    int hours;
+    int minutes;
+    int seconds;
     unsigned long lastStatsTime;
 } gpsData = {0};
 
@@ -65,6 +69,44 @@ void configureGPS() {
     delay(1000);
     
     Serial.println("GPS configuré !");
+}
+
+void checkClientTimeout() {
+    if (client && client.connected()) {
+        if (millis() - lastClientActivity > CLIENT_TIMEOUT) {
+            Serial.println("Client timeout - Disconnecting");
+            client.stop();
+        }
+    }
+}
+
+bool isClientConnected() {
+    if (!client) return false;
+    
+    if (!client.connected()) {
+        Serial.println("Client disconnected - Cleaning up");
+        client.stop();
+        return false;
+    }
+    
+    return true;
+}
+
+void handleNewClient() {
+    if (server.hasClient()) {
+        if (!isClientConnected()) {
+            // Accepte le nouveau client
+            client = server.available();
+            lastClientActivity = millis();
+            Serial.printf("New client connected from IP: %s\n", client.remoteIP().toString().c_str());
+        } else {
+            // Rejette proprement le nouveau client
+            WiFiClient rejectClient = server.available();
+            rejectClient.println("Server busy - Try again later");
+            rejectClient.stop();
+            Serial.println("Client connection rejected - Server busy");
+        }
+    }
 }
 
 void setup() {
@@ -168,7 +210,6 @@ void parseGNGGA(const char* frame) {
 void sendMinimalData() {
     if (client && client.connected() && gpsData.hasValidFix) {
         char buffer[128];
-        // Ajout de l'heure au format HH:MM:SS
         int len = snprintf(buffer, sizeof(buffer), 
             "%.6f,%.6f,%.1f,%d,%d,%02d:%02d:%02d\n", 
             gpsData.latitude, 
@@ -186,24 +227,16 @@ void sendMinimalData() {
 }
 
 void loop() {
-    // Gestion des connexions clients
-    if (server.hasClient()) {
-        if (!client || !client.connected()) {
-            if (client) {
-                Serial.println("Previous client disconnected");
-                client.stop();
-            }
-            client = server.available();
-            Serial.printf("New client connected from IP: %s\n", client.remoteIP().toString().c_str());
-        } else {
-            WiFiClient rejectClient = server.available();
-            rejectClient.stop();
-            Serial.println("Client connection rejected - Already have an active client");
-        }
-    }
+    // Vérifie le timeout du client
+    checkClientTimeout();
+    
+    // Gère les nouvelles connexions
+    handleNewClient();
 
-    // Traitement des données GPS
-    if (client && client.connected()) {
+    // Si un client est connecté, traite les données GPS
+    if (isClientConnected()) {
+        lastClientActivity = millis(); // Met à jour le timestamp d'activité
+        
         while (GPSSerial.available()) {
             char c = GPSSerial.read();
             gpsBuffer[bufferIndex++] = c;
@@ -229,6 +262,7 @@ void loop() {
             }
         }
     } else {
+        // Vide le buffer GPS si pas de client
         while (GPSSerial.available()) {
             GPSSerial.read();
         }
